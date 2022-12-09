@@ -875,6 +875,8 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 sequence_parallel=sequence_parallel,
                 normalize_attention_scores=normalize_attention_scores,
             )
+        else:
+            raise NotImplementedError(f'Attention algorithm {attention_impl} has not been implemented.')
 
         # Output.
         self.dense = tensor_parallel.RowParallelLinear(
