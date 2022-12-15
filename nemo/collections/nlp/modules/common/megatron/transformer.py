@@ -666,9 +666,6 @@ class FlashAttention(MegatronModule):
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
         self.sequence_parallel = sequence_parallel
-        # If True, will scale attention scores by 1 / sqrt(hidden_size_per_attention_head).
-        # This arg is been provided mostly to support weight conversion of Huggingface models. (ex: T5v1.1)
-        self.normalize_attention_scores = normalize_attention_scores
 
         if kv_channels is None:
             assert (
@@ -685,22 +682,6 @@ class FlashAttention(MegatronModule):
         self.num_attention_heads_per_partition = safe_divide(num_attention_heads, world_size)
         self.num_attention_heads_partition_offset = (
             self.num_attention_heads_per_partition * parallel_state.get_tensor_model_parallel_rank()
-        )
-
-        coeff = None
-        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
-        if self.apply_query_key_layer_scaling:
-            coeff = self.layer_number
-            self.norm_factor *= coeff
-
-        self.scale_mask_softmax = MatchedScaleMaskSoftmax(
-            self.fp16,
-            self.bf16,
-            self.attn_mask_type,
-            masked_softmax_fusion,
-            attention_mask_func,
-            self.attention_softmax_in_fp32,
-            coeff,
         )
 
         self.attention_dropout = attention_dropout
