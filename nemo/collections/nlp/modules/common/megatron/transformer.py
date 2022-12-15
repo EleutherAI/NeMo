@@ -16,7 +16,7 @@
 """Transformer."""
 import math
 from contextlib import nullcontext
-from enum import StrEnum
+from enum import Enum
 from typing import Any, Callable, Optional
 
 import torch
@@ -102,7 +102,7 @@ except:
 """
 
 
-class AttentionImpl(StrEnum):
+class AttentionImpl(Enum):
     core = "core"
     flash = "flash"
 
