@@ -718,7 +718,7 @@ class FlashAttention(MegatronModule):
         # [b, sq, np, hn] -> [b, np, sq, hn]
         matmul_result = matmul_result.transpose(1, 2)
          # [b, np, sq, hn] --> [sq, b, np, hn]
-        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+        context_layer = matmul_result.permute(2, 0, 1, 3).contiguous()
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size_per_partition,)
         context_layer = context_layer.view(*new_context_layer_shape)
