@@ -688,7 +688,7 @@ class FlashAttention(MegatronModule):
 
 
 
-    def forward(self, query_layer, key_layer, value_layer):
+    def forward(self, query_layer, key_layer, value_layer, **kwargs):
         # [b, np, sq, sk]
         output_size = (
             query_layer.size(1),
