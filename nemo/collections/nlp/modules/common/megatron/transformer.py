@@ -776,7 +776,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         sequence_parallel=False,
         gradient_accumulation_fusion=False,
         normalize_attention_scores=True,
-        attention_impl=AttentionImpl.core
+        attention_impl=AttentionImpl.flash
     ):
         super(ParallelAttention, self).__init__()
 
