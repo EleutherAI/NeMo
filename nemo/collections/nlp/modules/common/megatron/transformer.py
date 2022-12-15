@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from nemo.collections.common.parts.adapter_modules import LinearAdapterConfig
+#from nemo.collections.common.parts.adapter_modules import LinearAdapterConfig
 #from nemo.collections.nlp.modules.common.megatron.adapters.parallel_adapters import (
 #    AdapterName,
 #    InfusedAdapterConfig,
@@ -53,11 +53,11 @@ from nemo.utils import logging
 try:
     from apex.transformer import parallel_state, tensor_parallel
     from apex.transformer.enums import AttnMaskType, AttnType, ModelType
+    from apex.transformer.functional.fused_softmax import FusedScaleMaskSoftmax
     from apex.transformer.utils import divide as safe_divide
     from apex.transformer.parallel_state import get_tensor_model_parallel_world_size
     from apex.normalization import MixedFusedRMSNorm
 
-    HAVE_APEX = True
 
 except (ImportError, ModuleNotFoundError):
 
@@ -486,7 +486,7 @@ class CoreAttention(MegatronModule):
             coeff = self.layer_number
             self.norm_factor *= coeff
 
-        self.scale_mask_softmax = MatchedScaleMaskSoftmax(
+        self.scale_mask_softmax = FusedScaleMaskSoftmax(
             self.fp16,
             self.bf16,
             self.attn_mask_type,
@@ -1092,7 +1092,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 self.hidden_size_per_attention_head,
             )
             query_layer = query_layer.view(*new_tensor_shape)
-
+        """
         if self.is_adapter_available():
             key_infused_adapter = self.get_from_adapter_layer(AdapterName.KEY_INFUSED)
             value_infused_adapter = self.get_from_adapter_layer(AdapterName.VALUE_INFUSED)
@@ -1104,7 +1104,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 assert key_infused_adapter is not None, "Expected key_infused_adapter not found!"
                 vls = value_layer.shape
                 value_layer = value_infused_adapter(value_layer.reshape(vls[0], vls[1], -1)).reshape(vls)
-
+        """
         # ===================================================
         # Adjust key, value, and attention mask for inference
         # ===================================================
