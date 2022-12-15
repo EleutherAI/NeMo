@@ -58,32 +58,13 @@ try:
     from apex.transformer.parallel_state import get_tensor_model_parallel_world_size
     from apex.normalization import MixedFusedRMSNorm
 
+    HAVE_APEX = True
 
 except (ImportError, ModuleNotFoundError):
 
     HAVE_APEX = False
-
     # fake missing classes with None attributes
     ModelType = AttnMaskType = AttnType = LayerType = ApexGuardDefaults()
-
-try:
-    from transformer_engine.pytorch import TransformerLayer, fp8_autocast
-    from transformer_engine.common import recipe
-    from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-
-    HAVE_TE = True
-
-except:
-    HAVE_TE = False
-
-    # fake missing class
-    class TransformerLayer(ApexGuardDefaults):
-        def __init__(self):
-            super().__init__()
-
-            logging.warning(
-                "Transformer Engine was not found. transformer_engine.pytorch.transformer.TransformerLayer will not work. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
-            )
 
 
 """ We use the following notation throughout this file:
@@ -107,7 +88,7 @@ class AttentionImpl(Enum):
     flash = "flash"
 
 
-class ParallelMLP(MegatronModule, adapter_mixins.AdapterModuleMixin):
+class ParallelMLP(MegatronModule):
     """MLP.
 
     MLP will take the input with h hidden state, project it to 4*h
@@ -293,135 +274,6 @@ class ParallelMLP(MegatronModule, adapter_mixins.AdapterModuleMixin):
         return output, output_bias
 
 
-class SwitchMLP(MegatronModule):
-    """Top-1 MoE
-    
-    Curently supports Sinkhorn based expert routing."""
-
-    def __init__(
-        self,
-        num_experts,
-        init_method,
-        output_layer_init_method,
-        hidden_size,
-        ffn_hidden_size,
-        use_cpu_initialization=False,
-        bias_activation_fusion=True,
-        openai_gelu=False,
-        onnx_safe=False,
-        activation='gelu',
-        bias=True,
-        transformer_block_type='pre_ln',
-        normalization='layernorm',
-        layernorm_epsilon=1e-5,
-        persist_layer_norm=False,
-        sequence_parallel=False,
-        gradient_accumulation_fusion=False,
-        dropout=0.0,
-    ):
-        super(SwitchMLP, self).__init__()
-
-        self.num_experts = num_experts
-        self.route_algo = SwitchMLP.sinkhorn
-        self.router = tensor_parallel.RowParallelLinear(
-            hidden_size,
-            num_experts,
-            input_is_parallel=False,
-            init_method=init_method,
-            skip_bias_add=False,
-            use_cpu_initialization=use_cpu_initialization,
-            bias=bias,
-            sequence_parallel_enabled=sequence_parallel,
-            gradient_accumulation_fusion=gradient_accumulation_fusion,
-        )
-
-        mlp_args = {
-            'init_method': init_method,
-            'output_layer_init_method': output_layer_init_method,
-            'hidden_size': hidden_size,
-            'ffn_hidden_size': ffn_hidden_size,
-            'use_cpu_initialization': use_cpu_initialization,
-            'bias_activation_fusion': bias_activation_fusion,
-            'openai_gelu': openai_gelu,
-            'onnx_safe': onnx_safe,
-            'activation': activation,
-            'bias': bias,
-            'transformer_block_type': transformer_block_type,
-            'normalization': normalization,
-            'layernorm_epsilon': layernorm_epsilon,
-            'persist_layer_norm': persist_layer_norm,
-            'sequence_parallel': sequence_parallel,
-            'gradient_accumulation_fusion': gradient_accumulation_fusion,
-            'dropout': dropout,
-        }
-        self.experts = torch.nn.ModuleList([ParallelMLP(**mlp_args) for _ in range(num_experts)])
-
-    def forward(self, hidden_states):
-        hidden_shape = hidden_states.shape
-        route, _ = self.router(hidden_states)
-        route = route.view(-1, self.num_experts)
-        if self.training:
-            with torch.no_grad():
-                norm_route = self.route_algo(
-                    route.detach().to(dtype=torch.float32)
-                )  # explicit fp32 conversion for stability
-                _, max_ind = torch.max(norm_route, dim=1)
-            route = torch.sigmoid(route)
-            max_prob = route[torch.arange(route.size(0)), max_ind]
-        else:
-            route = torch.sigmoid(route)
-            max_prob, max_ind = torch.max(route, dim=1)
-        max_prob = torch.unsqueeze(max_prob, 1)
-
-        hidden_states = hidden_states.view(-1, hidden_shape[-1])
-
-        local_indices = (max_ind == 0).nonzero()
-        hidden = hidden_states[local_indices, :]
-        output, output_bias = self.experts[0](hidden)
-        output_bias = output_bias.expand_as(output)
-
-        output_total = torch.empty_like(hidden_states, dtype=output.dtype)
-        output_bias_total = torch.empty_like(hidden_states, dtype=output_bias.dtype)
-
-        output_total[local_indices, :] = output
-        output_bias_total[local_indices, :] = output_bias
-
-        for expert_num, expert in enumerate(self.experts):
-            if expert_num == 0:
-                continue
-            local_indices = (max_ind == expert_num).nonzero()
-            hidden = hidden_states[local_indices, :]
-            output, output_bias = expert(hidden)
-            output_bias = output_bias.expand_as(output)
-            output_total[local_indices, :] = output
-            output_bias_total[local_indices, :] = output_bias
-
-        output_total = output_total * max_prob
-        output_bias_total = output_bias_total * max_prob
-        output_total = output_total.view(hidden_shape)
-        output_bias_total = output_bias_total.view(hidden_shape)
-
-        return output_total, output_bias_total
-
-    @classmethod
-    def sinkhorn(cls, cost, tol=0.0001):
-        "Megatron-LMs sinkhorn implementation"
-
-        cost = torch.exp(cost)
-        d0 = torch.ones(cost.size(0), device=cost.device, dtype=cost.dtype)
-        d1 = torch.ones(cost.size(1), device=cost.device, dtype=cost.dtype)
-
-        eps = 0.00000001
-        error = 1e9
-        d1_old = d1
-        while error > tol:
-            d0 = (1 / d0.size(0)) * 1 / (torch.sum(d1 * cost, 1) + eps)
-            d1 = (1 / d1.size(0)) * 1 / (torch.sum(d0.unsqueeze(1) * cost, 0) + eps)
-            error = torch.mean(torch.abs(d1_old - d1))
-            d1_old = d1
-        return d1 * cost * d0.unsqueeze(1)
-
-
 class CoreAttention(MegatronModule):
     """ Region where selective activation recomputation is applied.
         See Figure 3. in Reducing Activation Recomputation in Large Transformer Models
@@ -442,7 +294,6 @@ class CoreAttention(MegatronModule):
         masked_softmax_fusion=True,
         attention_dropout=0.1,
         sequence_parallel=False,
-        normalize_attention_scores=True,
     ):
 
         super(CoreAttention, self).__init__()
@@ -459,10 +310,7 @@ class CoreAttention(MegatronModule):
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
         self.sequence_parallel = sequence_parallel
-        # If True, will scale attention scores by 1 / sqrt(hidden_size_per_attention_head).
-        # This arg is been provided mostly to support weight conversion of Huggingface models. (ex: T5v1.1)
-        self.normalize_attention_scores = normalize_attention_scores
-
+        
         if kv_channels is None:
             assert (
                 hidden_size % num_attention_heads == 0
@@ -728,7 +576,7 @@ class FlashAttention(MegatronModule):
 
 
 
-class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
+class ParallelAttention(MegatronModule):
     """Parallel self-attention layer abstract class.
 
     Self-attention layer takes input with size [s, b, h]
@@ -757,7 +605,6 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         activations_checkpoint_granularity=None,
         sequence_parallel=False,
         gradient_accumulation_fusion=False,
-        normalize_attention_scores=True,
         attention_impl=AttentionImpl.flash
     ):
         super(ParallelAttention, self).__init__()
@@ -765,7 +612,6 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
         self.layer_number = max(1, layer_number)
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
-        self.normalize_attention_scores = normalize_attention_scores
 
         self.megatron_legacy = megatron_legacy
 
@@ -840,7 +686,6 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 masked_softmax_fusion=masked_softmax_fusion,
                 attention_dropout=attention_dropout,
                 sequence_parallel=sequence_parallel,
-                normalize_attention_scores=normalize_attention_scores,
             )
         elif attention_impl == AttentionImpl.flash:
             self.attention = FlashAttention(
@@ -855,7 +700,6 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
                 masked_softmax_fusion=masked_softmax_fusion,
                 attention_dropout=attention_dropout,
                 sequence_parallel=sequence_parallel,
-                normalize_attention_scores=normalize_attention_scores,
             )
         else:
             raise NotImplementedError(f'Attention algorithm {attention_impl} has not been implemented.')
