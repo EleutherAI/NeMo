@@ -24,12 +24,12 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from nemo.collections.common.parts.adapter_modules import LinearAdapterConfig
-from nemo.collections.nlp.modules.common.megatron.adapters.parallel_adapters import (
-    AdapterName,
-    InfusedAdapterConfig,
-    MLPInfusedAdapterConfig,
-    ParallelLinearAdapterConfig,
-)
+#from nemo.collections.nlp.modules.common.megatron.adapters.parallel_adapters import (
+#    AdapterName,
+#    InfusedAdapterConfig,
+#    MLPInfusedAdapterConfig,
+#    ParallelLinearAdapterConfig,
+#)
 from nemo.collections.nlp.modules.common.megatron.fused_bias_dropout_add import (
     bias_dropout_add,
     bias_dropout_add_fused_inference,
@@ -40,7 +40,7 @@ from nemo.collections.nlp.modules.common.megatron.flash_attention import flash_a
 from nemo.collections.nlp.modules.common.megatron.fused_bias_geglu import fused_bias_geglu
 from nemo.collections.nlp.modules.common.megatron.fused_bias_gelu import fused_bias_gelu
 from nemo.collections.nlp.modules.common.megatron.fused_layer_norm import get_layer_norm
-from nemo.collections.nlp.modules.common.megatron.fused_softmax import MatchedScaleMaskSoftmax
+#from nemo.collections.nlp.modules.common.megatron.fused_softmax import MatchedScaleMaskSoftmax
 from nemo.collections.nlp.modules.common.megatron.layer_norm_1p import LayerNorm1P
 from nemo.collections.nlp.modules.common.megatron.layer_type import LayerType
 from nemo.collections.nlp.modules.common.megatron.module import MegatronModule
@@ -144,7 +144,7 @@ class ParallelMLP(MegatronModule, adapter_mixins.AdapterModuleMixin):
         self.persist_layer_norm = persist_layer_norm
         self.activation = activation
         self.dropout = dropout
-        self.set_accepted_adapter_types([MLPInfusedAdapterConfig._target_])
+        #self.set_accepted_adapter_types([MLPInfusedAdapterConfig._target_])
 
         if activation not in ['gelu', 'geglu', 'reglu', 'swiglu']:
             raise ValueError(f"Activation {activation} not supported. Only gelu, geglu, reglu, swiglu are supported.")
@@ -787,7 +787,7 @@ class ParallelAttention(MegatronModule, adapter_mixins.AdapterModuleMixin):
 
         self.megatron_legacy = megatron_legacy
 
-        self.set_accepted_adapter_types([InfusedAdapterConfig._target_])
+        #self.set_accepted_adapter_types([InfusedAdapterConfig._target_])
 
         if kv_channels is None:
             assert (
@@ -1413,7 +1413,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         self.layer_type = layer_type
         self.bias = bias
         self.transformer_block_type = transformer_block_type
-        self.set_accepted_adapter_types([LinearAdapterConfig._target_, ParallelLinearAdapterConfig._target_])
+        #self.set_accepted_adapter_types([LinearAdapterConfig._target_, ParallelLinearAdapterConfig._target_])
 
         if not bias and bias_dropout_add_fusion:
             raise ValueError(
