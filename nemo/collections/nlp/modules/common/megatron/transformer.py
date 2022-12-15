@@ -688,7 +688,7 @@ class FlashAttention(MegatronModule):
 
 
 
-    def forward(self, query_layer, key_layer, value_layer, **kwargs):
+    def forward(self, query_layer, key_layer, value_layer, attention_mask, **kwargs):
         # [b, np, sq, sk]
         output_size = (
             query_layer.size(1),
@@ -696,6 +696,7 @@ class FlashAttention(MegatronModule):
             query_layer.size(0),
             key_layer.size(0),
         )
+        causal = attention_mask is not None
         # [s, b, np, hn] -> [b, s, np, hn] -> [b * s, 1, np, hn]
         query_layer = query_layer.transpose(0, 1).reshape(output_size[0] * output_size[2], 1, output_size[1], -1)
         key_layer = key_layer.transpose(0, 1).reshape(output_size[0] * output_size[3], 1, output_size[1], -1)
@@ -710,7 +711,7 @@ class FlashAttention(MegatronModule):
         cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=qkv.device)
         output = self.flash_attention_function(
             qkv, cu_seqlens, max_s, self.attention_dropout,
-            softmax_scale=None, causal=True
+            softmax_scale=None, causal=causal
         )
         # [b * sq, np, hn] -> [b, sq, np, hn]
         matmul_result = output.view(output_size[0], output_size[2], output.shape[1], output.shape[2])
