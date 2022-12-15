@@ -709,7 +709,7 @@ class FlashAttention(MegatronModule):
         seqlen = output_size[2]
         max_s = seqlen
         cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=qkv.device)
-        output = self.flash_attention_function(
+        output = self.flash_attention_fn(
             qkv, cu_seqlens, max_s, self.attention_dropout,
             softmax_scale=None, causal=causal
         )
