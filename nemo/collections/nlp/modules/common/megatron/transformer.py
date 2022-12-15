@@ -280,9 +280,9 @@ class ParallelMLP(MegatronModule, adapter_mixins.AdapterModuleMixin):
         if self.dropout > 0:
             intermediate_parallel = F.dropout(intermediate_parallel, p=self.dropout, training=self.training)
 
-        infused_adapter = self.get_from_adapter_layer(AdapterName.MLP_INFUSED)
-        if infused_adapter:
-            intermediate_parallel = infused_adapter(intermediate_parallel)
+        #infused_adapter = self.get_from_adapter_layer(AdapterName.MLP_INFUSED)
+        #if infused_adapter:
+        #    intermediate_parallel = infused_adapter(intermediate_parallel)
 
         # Normformer normalization
         if self.transformer_block_type == 'normformer':
@@ -1746,7 +1746,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
 
             layernorm_input = bias_dropout_add_func(attention_output, attention_bias, residual, self.hidden_dropout)
             # print(f"Layer: {self.layer_number} Attention checksum {layernorm_input.sum()}")
-
+            """
             if self.is_adapter_available():
                 adapter_1 = self.get_from_adapter_layer(AdapterName.PRE_ATTN_ADAPTER)
                 if adapter_1:
@@ -1757,6 +1757,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                         adapter_name=AdapterName.PRE_ATTN_ADAPTER,
                         adapter_strategy=strategy,
                     )
+            """
 
             # Post-LN normalization after residual
             if self.transformer_block_type == 'post_ln':
@@ -1840,6 +1841,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         if get_key_value:
             output = [output, presents]
 
+        """
         if (
             self.is_adapter_available()
         ):  # TODO: (@adithyre) was able to move adapter_2 back to the end of the transformer after ptl 1.7 update.
@@ -1849,6 +1851,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                 output = self.forward_single_enabled_adapter_(
                     output, adapter_2, adapter_name=AdapterName.POST_ATTN_ADAPTER, adapter_strategy=strategy
                 )
+        """
 
         return output
 
