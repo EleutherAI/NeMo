@@ -38,7 +38,6 @@ from nemo.collections.nlp.modules.common.megatron.layer_type import LayerType
 from nemo.collections.nlp.modules.common.megatron.module import MegatronModule
 from nemo.collections.nlp.modules.common.megatron.rotary_pos_embedding import apply_rotary_pos_emb
 from nemo.collections.nlp.modules.common.megatron.utils import ApexGuardDefaults, attention_mask_func, erf_gelu
-from nemo.collections.nlp.modules.common.megatron.utils import openai_gelu as openai_gelu_func
 from nemo.core import adapter_mixins
 from nemo.utils import logging
 
@@ -208,6 +207,8 @@ class ParallelMLP(MegatronModule):
 
         if activation in ["gelu", "geglu"]:
             self.activation_func = F.gelu
+        elif openai_gelu:
+            self.activation_func = openai_gelu
         elif onnx_safe:
             self.activation_func = erf_gelu
         elif activation == "reglu":
@@ -628,8 +629,6 @@ class ParallelAttention(MegatronModule):
 
         self.megatron_legacy = megatron_legacy
 
-        #self.set_accepted_adapter_types([InfusedAdapterConfig._target_])
-
         if kv_channels is None:
             assert (
                 hidden_size % num_attention_heads == 0
@@ -1027,7 +1026,6 @@ class ParallelChunkedCrossAttention(MegatronModule):
         bias=True,
         headscale=False,
         gradient_accumulation_fusion=False,
-        normalize_attention_scores=True,
     ):
         super(ParallelChunkedCrossAttention, self).__init__()
         self.cross_attention = ParallelAttention(
@@ -1048,7 +1046,6 @@ class ParallelChunkedCrossAttention(MegatronModule):
             bias=bias,
             headscale=headscale,
             gradient_accumulation_fusion=gradient_accumulation_fusion,
-            normalize_attention_scores=normalize_attention_scores,
         )
         self.chunk_size = chunk_size
 
@@ -1060,13 +1057,7 @@ class ParallelChunkedCrossAttention(MegatronModule):
         set_inference_key_value_memory=False,
         inference_max_sequence_len=None,
         rotary_pos_emb=None,
-        checkpoint_core_attention=False,
     ):
-        if checkpoint_core_attention:
-            raise ValueError(
-                'checkpoint_core_attention during forward not implemented yet for ParallelChunkedCrossAttention'
-            )
-
         # hidden_states is assumed to have dimension [token length, batch, dimension]
         # derive variables
         # encoder_output here is the retrieved context
@@ -1078,7 +1069,7 @@ class ParallelChunkedCrossAttention(MegatronModule):
             hidden_states.shape[0],
             hidden_states.shape[2],
         )
-        default_bias = self.cross_attention.dense.bias
+        empty_bias = torch.zeros(dim, dtype=hidden_states.dtype, device=hidden_states.device)
         if set_inference_key_value_memory:
             seq_index = (n // chunk_size) * chunk_size
             self.current_len = n
@@ -1090,7 +1081,7 @@ class ParallelChunkedCrossAttention(MegatronModule):
             chunk_id = self.current_len // chunk_size
             if chunk_id <= 0:
                 # if sequence length less than chunk size, do an early return
-                return torch.zeros_like(hidden_states), default_bias
+                return torch.zeros_like(hidden_states), empty_bias
             causal_padding = chunk_size - 1
             # pad it as a full chunk, put it at the end of the chunk position
             hidden_states = F.pad(hidden_states, (0, 0, 0, 0, causal_padding, 0), value=0.0)
@@ -1106,7 +1097,7 @@ class ParallelChunkedCrossAttention(MegatronModule):
 
         # if sequence length less than chunk size, do an early return
         if n < self.chunk_size and set_inference_key_value_memory and inference_max_sequence_len is not None:
-            return torch.zeros_like(hidden_states), default_bias
+            return torch.zeros_like(hidden_states), empty_bias
 
         num_chunks, num_retrieved = (
             context.shape[-5],
@@ -1221,9 +1212,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         activations_checkpoint_granularity=None,
         sequence_parallel=False,
         normalize_attention_scores=True,
-        num_moe_experts=1,
-        moe_frequency=1,
-        moe_dropout=0.0,
     ):
         super(ParallelTransformerLayer_, self).__init__()
 
