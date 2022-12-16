@@ -17,7 +17,6 @@
 import math
 from contextlib import nullcontext
 from enum import Enum
-from typing import Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -57,7 +56,6 @@ except (ImportError, ModuleNotFoundError):
     # fake missing classes with None attributes
     ModelType = AttnMaskType = AttnType = LayerType = ApexGuardDefaults()
 
-
 """ We use the following notation throughout this file:
      h: hidden size
      n: number of attention heads
@@ -90,7 +88,6 @@ if HAVE_APEX:
             output_bias = self.bias if self.skip_bias_add else None
 
             return output, output_bias
-
 
 else:
 
@@ -684,6 +681,8 @@ class ParallelAttention(MegatronModule):
                 no_async_tensor_model_parallel_allreduce=no_async_tensor_model_parallel_allreduce,
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
             )
+        
+        self.checkpoint_core_attention = activations_checkpoint_granularity == 'selective'
 
         if attention_impl == AttentionImpl.core:
             self.attention = CoreAttention(
