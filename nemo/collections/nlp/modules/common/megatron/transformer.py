@@ -135,7 +135,6 @@ class ParallelMLP(MegatronModule):
         persist_layer_norm=False,
         sequence_parallel=False,
         gradient_accumulation_fusion=False,
-        dropout=0.0,
     ):
         super(ParallelMLP, self).__init__()
         self.activation = activation
@@ -145,8 +144,6 @@ class ParallelMLP(MegatronModule):
         self.layernorm_epsilon = layernorm_epsilon
         self.persist_layer_norm = persist_layer_norm
         self.activation = activation
-        self.dropout = dropout
-        #self.set_accepted_adapter_types([MLPInfusedAdapterConfig._target_])
 
         if activation not in ['gelu', 'geglu', 'reglu', 'swiglu']:
             raise ValueError(f"Activation {activation} not supported. Only gelu, geglu, reglu, swiglu are supported.")
@@ -155,7 +152,7 @@ class ParallelMLP(MegatronModule):
             parallel_state.get_tensor_model_parallel_world_size() == 1 or sequence_parallel
         )
         # Project to 4h.
-        self.dense_h_to_4h = tensor_parallel.ColumnParallelLinear(
+        self.dense_h_to_4h = ColumnLinear(
             hidden_size,
             ffn_hidden_size,  # NOTE: When using geglu, divide ffn dim by 2/3 to keep overall params the same.
             gather_output=False,
@@ -171,7 +168,7 @@ class ParallelMLP(MegatronModule):
         if activation in ['geglu', 'reglu', 'swiglu']:
             # Separate linear layer for *GLU activations.
             # Source: https://github.com/huggingface/transformers/blob/bee361c6f1f7704f8c688895f2f86f6e5ff84727/src/transformers/models/t5/modeling_t5.py#L292
-            self.dense_h_to_4h_2 = tensor_parallel.ColumnParallelLinear(
+            self.dense_h_to_4h_2 = ColumnLinear(
                 hidden_size,
                 ffn_hidden_size,  # NOTE: When using *glu, divide ffn dim by 2/3 to keep overall params the same.
                 gather_output=False,
@@ -191,10 +188,15 @@ class ParallelMLP(MegatronModule):
             raise ValueError(
                 f"Cannot use bias_activation_fusion with {activation} activation. Please turn bias gelu fusion off."
             )
-
-        if self.glu_activation_family and onnx_safe and self.bias_activation_fusion:
+        
+        if self.glu_activation_family and openai_gelu:
             raise ValueError(
-                f"Cannot use onnx_safe with specificed activation function and bias_activation_fusion : {activation} Please turn onnx safe off."
+                f"Cannot use openai_gelu with specificed activation function : {activation} Please turn openai gelu off."
+            )
+
+        if self.glu_activation_family and onnx_safe:
+            raise ValueError(
+                f"Cannot use onnx_safe with specificed activation function : {activation} Please turn onnx safe off."
             )
 
         if bias_activation_fusion and not bias:
@@ -204,10 +206,7 @@ class ParallelMLP(MegatronModule):
 
         self.bias_activation_fusion = bias_activation_fusion
 
-        # Give openai_gelu precedence over other activations if set, for HF compatibility. Normally this is off and shouldn't affect regular model training.
-        if openai_gelu:
-            self.activation_func = openai_gelu_func
-        elif activation in ["gelu", "geglu"]:
+        if activation in ["gelu", "geglu"]:
             self.activation_func = F.gelu
         elif onnx_safe:
             self.activation_func = erf_gelu
@@ -278,13 +277,6 @@ class ParallelMLP(MegatronModule):
                 intermediate_parallel = self.activation_func(intermediate_parallel + bias_parallel)
             else:
                 intermediate_parallel = self.activation_func(intermediate_parallel)
-
-        if self.dropout > 0:
-            intermediate_parallel = F.dropout(intermediate_parallel, p=self.dropout, training=self.training)
-
-        #infused_adapter = self.get_from_adapter_layer(AdapterName.MLP_INFUSED)
-        #if infused_adapter:
-        #    intermediate_parallel = infused_adapter(intermediate_parallel)
 
         # Normformer normalization
         if self.transformer_block_type == 'normformer':
@@ -422,7 +414,7 @@ class CoreAttention(MegatronModule):
             query_layer.transpose(0, 1),  # [b * np, sq, hn]
             key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
             beta=0.0,
-            alpha=(1.0 / self.norm_factor) if self.normalize_attention_scores else 1.0,
+            alpha=(1.0 / self.norm_factor),
         )
 
         # change view to [b, np, sq, sk]
@@ -659,7 +651,7 @@ class ParallelAttention(MegatronModule):
 
         # Strided linear layer.
         if attention_type == AttnType.self_attn:
-            self.query_key_value = tensor_parallel.ColumnParallelLinear(
+            self.query_key_value = ColumnLinear(
                 hidden_size,
                 3 * projection_size,
                 gather_output=False,
@@ -672,7 +664,7 @@ class ParallelAttention(MegatronModule):
             )
         else:
             assert attention_type == AttnType.cross_attn
-            self.query = tensor_parallel.ColumnParallelLinear(
+            self.query = ColumnLinear(
                 hidden_size,
                 projection_size,
                 gather_output=False,
@@ -683,7 +675,7 @@ class ParallelAttention(MegatronModule):
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
             )
 
-            self.key_value = tensor_parallel.ColumnParallelLinear(
+            self.key_value = ColumnLinear(
                 hidden_size,
                 2 * projection_size,
                 gather_output=False,
@@ -868,7 +860,6 @@ class ParallelAttention(MegatronModule):
         inference_max_sequence_len=None,
         rotary_pos_emb=None,  # rotary positional embedding
         relative_position_bias=None,
-        checkpoint_core_attention=False,
     ):
         # hidden_states: [sq, b, h]
 
@@ -924,8 +915,6 @@ class ParallelAttention(MegatronModule):
                 self.num_attention_heads_per_partition,
                 2 * self.hidden_size_per_attention_head,
             )
-            if self.megatron_legacy:
-                mixed_kv_layer = self._transpose_last_dim(mixed_kv_layer, 2, True)
             mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
 
             # [sk, b, np, 2 * hn] --> 2 [sk, b, np, hn]
@@ -939,19 +928,7 @@ class ParallelAttention(MegatronModule):
                 self.hidden_size_per_attention_head,
             )
             query_layer = query_layer.view(*new_tensor_shape)
-        """
-        if self.is_adapter_available():
-            key_infused_adapter = self.get_from_adapter_layer(AdapterName.KEY_INFUSED)
-            value_infused_adapter = self.get_from_adapter_layer(AdapterName.VALUE_INFUSED)
-            if key_infused_adapter:
-                assert value_infused_adapter is not None, "Expected value_infused_adapter not found!"
-                kls = key_layer.shape
-                key_layer = key_infused_adapter(key_layer.reshape(kls[0], kls[1], -1)).reshape(kls)
-            if value_infused_adapter:
-                assert key_infused_adapter is not None, "Expected key_infused_adapter not found!"
-                vls = value_layer.shape
-                value_layer = value_infused_adapter(value_layer.reshape(vls[0], vls[1], -1)).reshape(vls)
-        """
+
         # ===================================================
         # Adjust key, value, and attention mask for inference
         # ===================================================
@@ -990,7 +967,7 @@ class ParallelAttention(MegatronModule):
         if get_key_value:
             present = (key_layer, value_layer)
 
-        if checkpoint_core_attention:
+        if self.checkpoint_core_attention:
             context_layer = self._checkpointed_attention_forward(
                 query_layer,
                 key_layer,
