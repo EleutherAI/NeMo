@@ -1710,9 +1710,8 @@ class ParallelTransformer(MegatronModule):
         ffn_dropout=0.0,
         use_cpu_initialization=False,
         bias_activation_fusion=True,
-        bias_dropout_add_fusion=True,
+        bias_dropout_fusion=True,
         masked_softmax_fusion=True,
-        gradient_accumulation_fusion=False,
         persist_layer_norm=False,
         openai_gelu=False,
         onnx_safe=False,
@@ -1726,21 +1725,8 @@ class ParallelTransformer(MegatronModule):
         headscale=False,
         layer_number_offset=0,  # this is use only for attention norm_factor scaling
         activations_checkpoint_granularity=None,
-        activations_checkpoint_layers_per_pipeline=None,
         sequence_parallel=False,
-        transformer_engine=False,
-        fp8=False,
-        fp8_e4m3=False,
-        fp8_hybrid=False,
-        fp8_margin=0,
-        fp8_interval=1,
-        fp8_amax_history_len=1,
-        fp8_amax_compute_algo='most_recent',
-        use_emha=False,
-        normalize_attention_scores=True,
-        num_moe_experts=1,
-        moe_frequency=1,
-        moe_dropout=0.0,
+        gradient_accumulation_fusion=False,
     ):
         super(ParallelTransformer, self).__init__()
 
@@ -1763,26 +1749,16 @@ class ParallelTransformer(MegatronModule):
         self.activations_checkpoint_method = activations_checkpoint_method
         self.activations_checkpoint_num_layers = activations_checkpoint_num_layers
         self.activations_checkpoint_granularity = activations_checkpoint_granularity
-        self.activations_checkpoint_layers_per_pipeline = activations_checkpoint_layers_per_pipeline
 
         if self.activations_checkpoint_granularity:
             if self.activations_checkpoint_granularity == 'selective':
-                if self.activations_checkpoint_method == 'uniform':
-                    logging.info(
-                        (
-                            f'Using uniform activation checkpointing with granularity selective forces all layers to use checkpointing.'
-                        )
-                    )
-                elif self.activations_checkpoint_method == 'block':
-                    logging.info(
-                        (
-                            f'Using block activation checkpointing requires activations_checkpoint_num_layers to be set.'
-                            f'Got: {self.activations_checkpoint_num_layers}. Setting to 1 by default.'
-                        )
-                    )
-                else:
+                if self.activations_checkpoint_num_layers:
                     raise ValueError(
-                        f'activations_checkpoint_method should be "uniform" or "block" when using granularity selective.'
+                        f'When using selective activation checkpointing, activations_checkpoint_num_layers should be None, got: {activations_checkpoint_num_layers}.'
+                    )
+                if self.activations_checkpoint_method:
+                    raise ValueError(
+                        f'When using selective activation checkpointing, activations_checkpoint_method should be None, got: {activations_checkpoint_method}.'
                     )
             elif self.activations_checkpoint_granularity == 'full':
                 if self.activations_checkpoint_method in ['uniform', 'block']:
@@ -1801,42 +1777,12 @@ class ParallelTransformer(MegatronModule):
                 raise ValueError(f'activations_checkpoint_granularity should be "selective" or "full".')
 
         self.sequence_parallel = sequence_parallel
-        self.transformer_engine = transformer_engine
-        self.fp8 = fp8
-        self.fp8_e4m3 = fp8_e4m3
-        self.fp8_hybrid = fp8_hybrid
-        self.fp8_margin = fp8_margin
-        self.fp8_interval = fp8_interval
-        self.fp8_amax_history_len = fp8_amax_history_len
-        self.fp8_amax_compute_algo = fp8_amax_compute_algo
-
-        self.fp8_recipe = None
-
-        if self.fp8:
-            if self.fp8_e4m3:
-                fp8_format = recipe.Format.E4M3
-            elif self.fp8_hybrid:
-                fp8_format = recipe.Format.HYBRID
-            self.fp8_recipe = recipe.DelayedScaling(
-                margin=self.fp8_margin,
-                interval=self.fp8_interval,
-                fp8_format=fp8_format,
-                amax_history_len=self.fp8_amax_history_len,
-                amax_compute_algo=self.fp8_amax_compute_algo,
-            )
-
-        self.is_first_microbatch = True
-        self.microbatch_count = 0  # transformer engine forward needs to know if it is working on the first microbatch
-        self.checkpoint_core_attention = (
-            activations_checkpoint_granularity == 'selective'
-        )  # transformer engine forward allows for more granular selective checkpointing
 
         if self.model_type == ModelType.encoder_or_decoder:
             assert (
                 num_layers % parallel_state.get_pipeline_model_parallel_world_size() == 0
             ), 'num_layers must be divisible by pipeline_model_parallel_size'
 
-        assert moe_frequency <= num_layers, 'MoE frequency must be <= number of transformer layers'
         # TODO: Add similar assert for encoder-decoder.
 
         self.num_layers = self.get_num_layers(num_layers)
@@ -1846,9 +1792,6 @@ class ParallelTransformer(MegatronModule):
                 lt = layer_type[layer_number - 1]
             else:
                 lt = layer_type
-
-            
-            
             return ParallelTransformerLayer(
                 init_method=init_method,
                 output_layer_init_method=output_layer_init_method,
@@ -1868,7 +1811,7 @@ class ParallelTransformer(MegatronModule):
                 ffn_dropout=ffn_dropout,
                 use_cpu_initialization=use_cpu_initialization,
                 bias_activation_fusion=bias_activation_fusion,
-                bias_dropout_add_fusion=bias_dropout_add_fusion,
+                bias_dropout_fusion=bias_dropout_fusion,
                 masked_softmax_fusion=masked_softmax_fusion,
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
                 persist_layer_norm=persist_layer_norm,
@@ -1883,16 +1826,14 @@ class ParallelTransformer(MegatronModule):
                 headscale=headscale,
                 activations_checkpoint_granularity=activations_checkpoint_granularity,
                 sequence_parallel=sequence_parallel,
-                normalize_attention_scores=normalize_attention_scores,
+                gradient_accumulation_fusion=gradient_accumulation_fusion,
             )
 
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             assert num_layers % parallel_state.get_virtual_pipeline_model_parallel_world_size() == 0, (
                 'num_layers_per_stage must be divisible by ' 'virtual_pipeline_model_parallel_size'
             )
-
-            assert self.model_type.value != 2, f'virtual pipeline parallel currently only supported for GPT'
-
+            assert self.model_type != ModelType.encoder_or_decoder
             # Number of layers in each model chunk is the number of layers in the stage,
             # divided by the number of model chunks in a stage.
             self.num_layers = self.num_layers // parallel_state.get_virtual_pipeline_model_parallel_world_size()
@@ -1979,51 +1920,48 @@ class ParallelTransformer(MegatronModule):
         rotary_pos_emb,
         self_attention_relative_position_bias,
         cross_attention_relative_position_bias,
-        checkpoint_activations_all_layers,
     ):
         """Forward method with activation checkpointing."""
 
         def custom(start, end):
-            if self.transformer_engine:
-
-                def custom_forward(*inputs):
-                    hidden_states = inputs[0]
+            def custom_forward(*inputs):
+                if len(inputs) == 9:
+                    x_ = inputs[0]
                     attention_mask = inputs[1]
                     encoder_output = inputs[2]
                     enc_dec_attn_mask = inputs[3]
-                    for index in range(start, end):
-                        layer = self._get_layer(index)
-                        hidden_states = layer(
-                            hidden_states,
-                            attention_mask,
-                            encoder_output=encoder_output,
-                            enc_dec_attn_mask=enc_dec_attn_mask,
-                            inference_params=None,
-                            is_first_microbatch=self.is_first_microbatch,
-                            checkpoint_core_attention=False,
-                        )
-
-                    return hidden_states
-
-            else:
-
-                def custom_forward(*inputs):
-                    if len(inputs) == 9:
-                        hidden_states = inputs[0]
-                        attention_mask = inputs[1]
-                        encoder_output = inputs[2]
-                        enc_dec_attn_mask = inputs[3]
-                        rotary_pos_emb = (inputs[4], inputs[5], inputs[6])
-                        self_attention_relative_position_bias = inputs[7]
-                        cross_attention_relative_position_bias = inputs[8]
-                    elif len(inputs) == 10:
-                        hidden_states = (inputs[0], inputs[1])
-                        attention_mask = inputs[2]
-                        encoder_output = inputs[3]
-                        enc_dec_attn_mask = inputs[4]
-                        rotary_pos_emb = (inputs[5], inputs[6], inputs[7])
-                        self_attention_relative_position_bias = inputs[8]
-                        cross_attention_relative_position_bias = inputs[9]
+                    rotary_pos_emb = (inputs[4], inputs[5], inputs[6])
+                    self_attention_relative_position_bias = inputs[7]
+                    cross_attention_relative_position_bias = inputs[8]
+                elif len(inputs) == 10:
+                    x_ = (inputs[0], inputs[1])
+                    attention_mask = inputs[2]
+                    encoder_output = inputs[3]
+                    enc_dec_attn_mask = inputs[4]
+                    rotary_pos_emb = (inputs[5], inputs[6], inputs[7])
+                    self_attention_relative_position_bias = inputs[8]
+                    cross_attention_relative_position_bias = inputs[9]
+                else:
+                    x_ = inputs[0]
+                    attention_mask = inputs[1]
+                    encoder_output = inputs[2]
+                    enc_dec_attn_mask = inputs[3]
+                    rotary_pos_emb = inputs[4]
+                    self_attention_relative_position_bias = inputs[5]
+                    cross_attention_relative_position_bias = inputs[6]
+                for index in range(start, end):
+                    layer = self._get_layer(index)
+                    x_ = layer(
+                        x_,
+                        attention_mask,
+                        encoder_output,
+                        enc_dec_attn_mask,
+                        rotary_pos_emb,
+                        self_attention_relative_position_bias,
+                        cross_attention_relative_position_bias,
+                    )
+                    if isinstance(x_, tuple):
+                        pass
                     else:
                         hidden_states = inputs[0]
                         attention_mask = inputs[1]
