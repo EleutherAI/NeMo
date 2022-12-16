@@ -1192,16 +1192,14 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         kv_channels=None,
         layernorm_epsilon=1e-5,
         hidden_dropout=0.1,
+        bias_dropout_fusion=True,
         persist_layer_norm=False,
         use_cpu_initialization=False,
         bias_activation_fusion=True,
-        bias_dropout_add_fusion=True,
-        masked_softmax_fusion=True,
-        gradient_accumulation_fusion=False,
         openai_gelu=False,
         onnx_safe=False,
+        masked_softmax_fusion=True,
         attention_dropout=0.1,
-        ffn_dropout=0.0,
         activation='gelu',
         megatron_legacy=False,
         bias=True,
@@ -1211,7 +1209,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         headscale=False,
         activations_checkpoint_granularity=None,
         sequence_parallel=False,
-        normalize_attention_scores=True,
+        gradient_accumulation_fusion=False,
     ):
         super(ParallelTransformerLayer_, self).__init__()
 
@@ -1225,11 +1223,10 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         self.layer_type = layer_type
         self.bias = bias
         self.transformer_block_type = transformer_block_type
-        #self.set_accepted_adapter_types([LinearAdapterConfig._target_, ParallelLinearAdapterConfig._target_])
 
-        if not bias and bias_dropout_add_fusion:
+        if not bias and bias_dropout_fusion:
             raise ValueError(
-                'bias_dropout_add_fusion=True requires bias=True, found bias=False. Either set both to True or both to False.'
+                'bias_dropout_fusion=True requires bias=True, found bias=False. Either set both to True or both to False.'
             )
 
         if normalization not in ['layernorm', 'layernorm1p', 'rmsnorm']:
@@ -1243,7 +1240,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         self.fp32_residual_connection = fp32_residual_connection  # if true move residual connections to fp32
         self.hidden_dropout = hidden_dropout
         self.attention_dropout = attention_dropout
-        self.bias_dropout_add_fusion = bias_dropout_add_fusion  # if true, enable bias dropout fusion
+        self.bias_dropout_fusion = bias_dropout_fusion  # if true, enable bias dropout fusion
 
         # Self attention.
         # retrieval_decoder_after_self_attn skips the self attention
@@ -1281,7 +1278,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                 activations_checkpoint_granularity=activations_checkpoint_granularity,
                 sequence_parallel=sequence_parallel,
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
-                normalize_attention_scores=normalize_attention_scores,
             )
 
             if transformer_block_type == 'normformer':
@@ -1436,7 +1432,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
             persist_layer_norm=persist_layer_norm,
             sequence_parallel=sequence_parallel,
             gradient_accumulation_fusion=gradient_accumulation_fusion,
-            dropout=ffn_dropout,
         )
 
     def _get_bias_droput_add_func(self, transformer_block_type='pre_ln', position_after='attention'):
@@ -1449,13 +1444,13 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         if transformer_block_type == 'normformer' and position_after == 'attention':
             bias_dropout_add_func = get_dropout_add(self.training)
         # Bias dropout add fused kernel
-        elif self.bias and self.bias_dropout_add_fusion:
+        elif self.bias and self.bias_dropout_fusion:
             if self.training:
                 bias_dropout_add_func = bias_dropout_add_fused_train
             else:
                 bias_dropout_add_func = bias_dropout_add_fused_inference
         # Bias dropout add non-fused kernel
-        elif self.bias and not self.bias_dropout_add_fusion:
+        elif self.bias and not self.bias_dropout_fusion:
             bias_dropout_add_func = get_bias_dropout_add(self.training)
         # Dropout add non-fused kernel for a model without bias terms.
         else:
@@ -1476,7 +1471,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         rotary_pos_emb=None,  # list of positional embedding tensors, first one self attention, second one and third one are for cross attention (q, k)
         self_attention_relative_position_bias=None,
         cross_attention_relative_position_bias=None,
-        checkpoint_core_attention=False,
     ):
         # Self attention.
         if rotary_pos_emb is not None:
@@ -1508,7 +1502,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                 inference_max_sequence_len=inference_max_sequence_len,
                 rotary_pos_emb=self_attention_pos_emb,
                 relative_position_bias=self_attention_relative_position_bias,
-                checkpoint_core_attention=checkpoint_core_attention,
             )
 
             if get_key_value:
@@ -1535,19 +1528,13 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                 attention_bias = attention_bias.expand_as(residual)
 
             layernorm_input = bias_dropout_add_func(attention_output, attention_bias, residual, self.hidden_dropout)
-            # print(f"Layer: {self.layer_number} Attention checksum {layernorm_input.sum()}")
-            """
-            if self.is_adapter_available():
-                adapter_1 = self.get_from_adapter_layer(AdapterName.PRE_ATTN_ADAPTER)
-                if adapter_1:
-                    strategy = adapter_1.adapter_strategy
-                    layernorm_input = self.forward_single_enabled_adapter_(
-                        layernorm_input,
-                        adapter_1,
-                        adapter_name=AdapterName.PRE_ATTN_ADAPTER,
-                        adapter_strategy=strategy,
-                    )
-            """
+
+            if self.is_adapter_available():  # TODO: (@adithyre) need to find the correct place for this adapter
+                adapter_1 = self.adapter_layer['adapter_1']
+                strategy = adapter_1.adapter_strategy
+                layernorm_input = self.forward_single_enabled_adapter_(
+                    layernorm_input, adapter_1, adapter_name='adapter_1', adapter_strategy=strategy
+                )
 
             # Post-LN normalization after residual
             if self.transformer_block_type == 'post_ln':
@@ -1579,7 +1566,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                     rotary_pos_emb=cross_attention_pos_emb,
                     set_inference_key_value_memory=set_inference_key_value_memory,
                     inference_max_sequence_len=inference_max_sequence_len,
-                    checkpoint_core_attention=checkpoint_core_attention,
                 )
             else:
 
@@ -1589,7 +1575,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                     encoder_output=encoder_output,
                     rotary_pos_emb=cross_attention_pos_emb,
                     relative_position_bias=cross_attention_relative_position_bias,
-                    checkpoint_core_attention=checkpoint_core_attention,
                 )
 
             # If normformer, apply norm on the output of the self attention.
@@ -1608,7 +1593,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
             )
 
             layernorm_input = bias_dropout_add_func(attention_output, attention_bias, residual, self.hidden_dropout)
-            # print(f"Layer: {self.layer_number} Cross-Attention checksum {layernorm_input.sum()}")
             normalization_output = self.post_inter_attention_layernorm(layernorm_input)
             # Post-LN normalization after residual
             if self.transformer_block_type == 'post_ln':
@@ -1623,7 +1607,6 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         )
 
         output = bias_dropout_add_func(mlp_output, mlp_bias, residual, self.hidden_dropout)
-        # print(f"Layer: {self.layer_number} MLP + Dropout + Residual checksum {output.sum()}")
 
         if self.transformer_block_type == 'post_ln':
             output = self.post_attention_layernorm(output)
@@ -1631,107 +1614,27 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
         if get_key_value:
             output = [output, presents]
 
-        """
         if (
             self.is_adapter_available()
         ):  # TODO: (@adithyre) was able to move adapter_2 back to the end of the transformer after ptl 1.7 update.
-            adapter_2 = self.get_from_adapter_layer(AdapterName.POST_ATTN_ADAPTER)
-            if adapter_2:
-                strategy = adapter_2.adapter_strategy
-                output = self.forward_single_enabled_adapter_(
-                    output, adapter_2, adapter_name=AdapterName.POST_ATTN_ADAPTER, adapter_strategy=strategy
-                )
-        """
+            adapter_2 = self.adapter_layer['adapter_2']
+            strategy = adapter_2.adapter_strategy
+            output = self.forward_single_enabled_adapter_(
+                output, adapter_2, adapter_name='adapter_2', adapter_strategy=strategy
+            )
 
         return output
 
 
 class ParallelTransformerLayer(ParallelTransformerLayer_):
-    def __init__(
-        self,
-        init_method,
-        output_layer_init_method,
-        layer_number,
-        hidden_size,
-        ffn_hidden_size,
-        num_attention_heads,
-        layer_type=LayerType.encoder,
-        self_attn_mask_type=AttnMaskType.padding,
-        fp32_residual_connection=False,
-        precision=16,
-        apply_query_key_layer_scaling=True,
-        kv_channels=None,
-        layernorm_epsilon=1e-5,
-        hidden_dropout=0.1,
-        bias_dropout_add_fusion=True,
-        persist_layer_norm=False,
-        use_cpu_initialization=False,
-        bias_activation_fusion=True,
-        openai_gelu=False,
-        onnx_safe=False,
-        masked_softmax_fusion=True,
-        attention_dropout=0.1,
-        ffn_dropout=0.0,
-        activation='gelu',
-        megatron_legacy=False,
-        bias=True,
-        chunk_size=64,
-        normalization='layernorm',
-        transformer_block_type='pre_ln',
-        headscale=False,
-        activations_checkpoint_granularity=None,
-        sequence_parallel=False,
-        gradient_accumulation_fusion=False,
-        normalize_attention_scores=True,
-        num_moe_experts=1,
-        moe_frequency=1,
-        moe_dropout=0.0,
-    ):
-        super(ParallelTransformerLayer, self).__init__(
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            layer_number=layer_number,
-            hidden_size=hidden_size,
-            ffn_hidden_size=ffn_hidden_size,
-            num_attention_heads=num_attention_heads,
-            layer_type=layer_type,
-            self_attn_mask_type=self_attn_mask_type,
-            fp32_residual_connection=fp32_residual_connection,
-            precision=precision,
-            apply_query_key_layer_scaling=apply_query_key_layer_scaling,
-            kv_channels=kv_channels,
-            layernorm_epsilon=layernorm_epsilon,
-            hidden_dropout=hidden_dropout,
-            bias_dropout_add_fusion=bias_dropout_add_fusion,
-            persist_layer_norm=persist_layer_norm,
-            use_cpu_initialization=use_cpu_initialization,
-            bias_activation_fusion=bias_activation_fusion,
-            openai_gelu=openai_gelu,
-            onnx_safe=onnx_safe,
-            masked_softmax_fusion=masked_softmax_fusion,
-            attention_dropout=attention_dropout,
-            ffn_dropout=ffn_dropout,
-            activation=activation,
-            megatron_legacy=megatron_legacy,
-            bias=bias,
-            chunk_size=chunk_size,
-            normalization=normalization,
-            transformer_block_type=transformer_block_type,
-            headscale=headscale,
-            activations_checkpoint_granularity=activations_checkpoint_granularity,
-            sequence_parallel=sequence_parallel,
-            gradient_accumulation_fusion=gradient_accumulation_fusion,
-            normalize_attention_scores=normalize_attention_scores,
-            num_moe_experts=num_moe_experts,
-            moe_frequency=moe_frequency,
-            moe_dropout=moe_dropout,
-        )
+    def __init__(self, **kwargs):
+        super(ParallelTransformerLayer, self).__init__(**kwargs)
 
-        if precision == 32:
+        if kwargs['precision'] == 32:
             self.dtype = torch.float32
-        elif precision == 16:
+        elif kwargs['precision'] == 16:
             self.dtype = torch.float16
-        elif precision == 'bf16':
+        elif kwargs['precision'] == 'bf16':
             self.dtype = torch.bfloat16
         else:
             raise ValueError
@@ -1749,7 +1652,6 @@ class ParallelTransformerLayer(ParallelTransformerLayer_):
         inference_max_sequence_len=None,
         self_attention_relative_position_bias=None,
         cross_attention_relative_position_bias=None,
-        checkpoint_core_attention=False,
     ):
         if self.dtype == torch.float32:
             return super().forward(
@@ -1764,7 +1666,6 @@ class ParallelTransformerLayer(ParallelTransformerLayer_):
                 rotary_pos_emb,
                 self_attention_relative_position_bias,
                 cross_attention_relative_position_bias,
-                checkpoint_core_attention,
             )
         with torch.autocast(device_type="cuda", dtype=self.dtype):
             return super().forward(
@@ -1779,7 +1680,6 @@ class ParallelTransformerLayer(ParallelTransformerLayer_):
                 rotary_pos_emb,
                 self_attention_relative_position_bias,
                 cross_attention_relative_position_bias,
-                checkpoint_core_attention,
             )
 
 
