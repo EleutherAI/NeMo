@@ -1339,9 +1339,9 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                 megatron_legacy=megatron_legacy,
                 bias=bias,
                 headscale=headscale,
+                activations_checkpoint_granularity=activations_checkpoint_granularity,
                 sequence_parallel=sequence_parallel,
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
-                normalize_attention_scores=normalize_attention_scores,
             )
             # Normformer normalization
             if transformer_block_type == 'normformer':
@@ -1707,7 +1707,6 @@ class ParallelTransformer(MegatronModule):
         layernorm_epsilon=1e-5,
         hidden_dropout=0.1,
         attention_dropout=0.1,
-        ffn_dropout=0.0,
         use_cpu_initialization=False,
         bias_activation_fusion=True,
         bias_dropout_fusion=True,
@@ -1808,12 +1807,10 @@ class ParallelTransformer(MegatronModule):
                 layernorm_epsilon=layernorm_epsilon,
                 hidden_dropout=hidden_dropout,
                 attention_dropout=attention_dropout,
-                ffn_dropout=ffn_dropout,
                 use_cpu_initialization=use_cpu_initialization,
                 bias_activation_fusion=bias_activation_fusion,
                 bias_dropout_fusion=bias_dropout_fusion,
                 masked_softmax_fusion=masked_softmax_fusion,
-                gradient_accumulation_fusion=gradient_accumulation_fusion,
                 persist_layer_norm=persist_layer_norm,
                 openai_gelu=openai_gelu,
                 onnx_safe=onnx_safe,
@@ -1963,29 +1960,8 @@ class ParallelTransformer(MegatronModule):
                     if isinstance(x_, tuple):
                         pass
                     else:
-                        hidden_states = inputs[0]
-                        attention_mask = inputs[1]
-                        encoder_output = inputs[2]
-                        enc_dec_attn_mask = inputs[3]
-                        rotary_pos_emb = inputs[4]
-                        self_attention_relative_position_bias = inputs[5]
-                        cross_attention_relative_position_bias = inputs[6]
-                    for index in range(start, end):
-                        layer = self._get_layer(index)
-                        hidden_states = layer(
-                            hidden_states=hidden_states,
-                            attention_mask=attention_mask,
-                            encoder_output=encoder_output,
-                            enc_dec_attn_mask=enc_dec_attn_mask,
-                            rotary_pos_emb=rotary_pos_emb,
-                            self_attention_relative_position_bias=self_attention_relative_position_bias,
-                            cross_attention_relative_position_bias=cross_attention_relative_position_bias,
-                        )
-                        if isinstance(hidden_states, tuple):
-                            pass
-                        else:
-                            hidden_states = hidden_states.contiguous()
-                    return hidden_states
+                        x_ = x_.contiguous()
+                return x_
 
             return custom_forward
 
@@ -2016,35 +1992,11 @@ class ParallelTransformer(MegatronModule):
                 final_tuple = (self_attention_relative_position_bias, cross_attention_relative_position_bias)
                 arg_tuple = hidden_tuple + middle_tuple + rot_tuple + final_tuple
 
-                if self.transformer_engine:
-                    hidden_states = te_checkpoint(
-                        custom(l, l + self.activations_checkpoint_num_layers),
-                        False,
-                        tensor_parallel.random.get_cuda_rng_tracker,
-                        parallel_state.get_tensor_model_parallel_group(),
-                        *arg_tuple,
-                    )
-                else:
-                    hidden_states = tensor_parallel.checkpoint(
-                        custom(l, l + self.activations_checkpoint_num_layers), False, *arg_tuple
-                    )
+                hidden_states = tensor_parallel.checkpoint(
+                    custom(l, l + self.activations_checkpoint_num_layers), False, *arg_tuple
+                )
                 l += self.activations_checkpoint_num_layers
         elif self.activations_checkpoint_method == 'block':
-            # When pipeline-parallel size > 1 and 'num_micro_batches_with_partial_activation_checkpoints' = int,
-            # pipeline scheduling can force to checkpoint all layers or partial layers in a micro-batch.
-            if checkpoint_activations_all_layers:
-                activations_checkpoint_num_layers = self.num_layers
-            else:
-                activations_checkpoint_num_layers = self.activations_checkpoint_num_layers
-                if (
-                    parallel_state.get_pipeline_model_parallel_world_size() > 0
-                    and self.activations_checkpoint_layers_per_pipeline is not None
-                ):
-                    # Decrease the number of layers to checkpoint at later pipeline stages
-                    activations_checkpoint_num_layers -= int(
-                        parallel_state.get_pipeline_model_parallel_rank()
-                        * self.activations_checkpoint_layers_per_pipeline
-                    )
             # Checkpoint the input activation of only a set number of individual
             # Transformer layers and skip the rest.
             # A method fully use the device memory removing redundant re-computation.
@@ -2067,17 +2019,8 @@ class ParallelTransformer(MegatronModule):
                 final_tuple = (self_attention_relative_position_bias, cross_attention_relative_position_bias)
                 arg_tuple = hidden_tuple + middle_tuple + rot_tuple + final_tuple
 
-                if l < activations_checkpoint_num_layers:
-                    if self.transformer_engine:
-                        hidden_states = te_checkpoint(
-                            custom(l, l + 1),
-                            False,
-                            tensor_parallel.random.get_cuda_rng_tracker,
-                            parallel_state.get_tensor_model_parallel_group(),
-                            *arg_tuple,
-                        )
-                    else:
-                        hidden_states = tensor_parallel.checkpoint(custom(l, l + 1), False, *arg_tuple)
+                if l < self.activations_checkpoint_num_layers:
+                    hidden_states = tensor_parallel.checkpoint(custom(l, l + 1), False, *arg_tuple)
                 else:
                     hidden_states = custom(l, l + 1)(*arg_tuple)
         else:
@@ -2109,7 +2052,6 @@ class ParallelTransformer(MegatronModule):
         retrieved_emb=None,  # tensor of retrieved embedding of shape [b, k, r, n, d]
         self_attention_relative_position_bias=None,
         cross_attention_relative_position_bias=None,
-        checkpoint_activations_all_layers=None,
     ):
         # Checks.
         if inference_max_sequence_len:
@@ -2132,117 +2074,45 @@ class ParallelTransformer(MegatronModule):
             # this is retrieval decoder, need special transpose
             encoder_output = rearrange(retrieved_emb, 'b k r n d -> k r n b d').contiguous()
 
-        """
-        is_first_microbatch is an optimization parameter for transformer engine.
-        It indicates if the current step in the forward pass is the first in a gradient accumulation cycle.
-        If set, FP8 weights are cached and some minor optimizations are applied to fuse_wgrad_accumulation
-        """
-        from apex.transformer.pipeline_parallel.utils import _GLOBAL_NUM_MICROBATCHES_CALCULATOR
-
-        num_micro_batches = getattr(_GLOBAL_NUM_MICROBATCHES_CALCULATOR, 'num_micro_batches', 1)
-
         if self.sequence_parallel:
             rng_context = tensor_parallel.random.get_cuda_rng_tracker().fork()
         else:
             rng_context = nullcontext()
 
         with rng_context:
-            # fp8_autocast will not do anything if TE or FP8 isn't used
-            fp8_group = None
-            if parallel_state.model_parallel_is_initialized():
-                fp8_group = parallel_state.get_data_parallel_group()
-
-            if HAVE_TE:
-                # if TE is installed but fp8 is not available then this will do nothing
-                fp8_context = fp8_autocast(enabled=self.fp8, fp8_recipe=self.fp8_recipe, fp8_group=fp8_group)
-
+            if self.activations_checkpoint_granularity == 'full':
+                hidden_states = self._checkpointed_forward(
+                    hidden_states,
+                    attention_mask,
+                    encoder_output,
+                    enc_dec_attn_mask,
+                    rotary_pos_emb,
+                    self_attention_relative_position_bias,
+                    cross_attention_relative_position_bias,
+                )
             else:
-                fp8_context = nullcontext()
-
-            with fp8_context:
-                if self.activations_checkpoint_granularity == 'full' and self.activations_checkpoint_num_layers > 0:
-                    hidden_states = self._checkpointed_forward(
+                if get_key_value:
+                    presents = []
+                for index in range(self.num_layers):
+                    layer = self._get_layer(index)
+                    past = None
+                    if layer_past is not None:
+                        past = layer_past[index]
+                    hidden_states = layer(
                         hidden_states,
                         attention_mask,
-                        encoder_output,
-                        enc_dec_attn_mask,
-                        rotary_pos_emb,
-                        self_attention_relative_position_bias,
-                        cross_attention_relative_position_bias,
-                        checkpoint_activations_all_layers,
+                        encoder_output=encoder_output,
+                        enc_dec_attn_mask=enc_dec_attn_mask,
+                        layer_past=past,
+                        get_key_value=get_key_value,
+                        set_inference_key_value_memory=set_inference_key_value_memory,
+                        inference_max_sequence_len=inference_max_sequence_len,
+                        rotary_pos_emb=rotary_pos_emb,
+                        self_attention_relative_position_bias=self_attention_relative_position_bias,
+                        cross_attention_relative_position_bias=cross_attention_relative_position_bias,
                     )
-                else:
-                    if get_key_value:
-                        presents = []
-
-                    for index in range(self.num_layers):
-                        layer = self._get_layer(index)
-                        past = None
-
-                        if layer_past is not None:
-                            past = layer_past[index]
-
-                        if self.activations_checkpoint_granularity == 'selective':
-                            # When pipeline-parallel size > 1 and 'num_micro_batches_with_partial_activation_checkpoints' = int,
-                            # pipeline scheduling can force to checkpoint all layers or partial layers in a micro-batch.
-                            if (
-                                checkpoint_activations_all_layers == True
-                                or self.activations_checkpoint_method == 'uniform'
-                            ):
-                                checkpoint_core_attention = True
-                            elif self.activations_checkpoint_method == 'block':
-                                activations_checkpoint_num_layers = self.activations_checkpoint_num_layers
-                                # Decrease the number of layers to checkpoint at later pipeline stages
-                                if self.activations_checkpoint_layers_per_pipeline is not None:
-                                    activations_checkpoint_num_layers -= int(
-                                        parallel_state.get_pipeline_model_parallel_rank()
-                                        * self.activations_checkpoint_layers_per_pipeline
-                                    )
-                                checkpoint_core_attention = index < activations_checkpoint_num_layers
-                        else:
-                            checkpoint_core_attention = False
-
-                        if self.transformer_engine:
-
-                            inference_params = None
-
-                            hidden_states = layer(
-                                hidden_states,
-                                attention_mask,
-                                encoder_output=encoder_output,
-                                enc_dec_attn_mask=enc_dec_attn_mask,
-                                inference_params=inference_params,
-                                is_first_microbatch=self.is_first_microbatch,
-                                checkpoint_core_attention=checkpoint_core_attention,
-                            )
-
-                        else:
-                            hidden_states = layer(
-                                hidden_states,
-                                attention_mask,
-                                encoder_output=encoder_output,
-                                enc_dec_attn_mask=enc_dec_attn_mask,
-                                layer_past=past,
-                                get_key_value=get_key_value,
-                                set_inference_key_value_memory=set_inference_key_value_memory,
-                                inference_max_sequence_len=inference_max_sequence_len,
-                                rotary_pos_emb=rotary_pos_emb,
-                                self_attention_relative_position_bias=self_attention_relative_position_bias,
-                                cross_attention_relative_position_bias=cross_attention_relative_position_bias,
-                                checkpoint_core_attention=checkpoint_core_attention,
-                            )
-
-        # Skip counter update for eval and activation checkpointing
-        if torch.is_grad_enabled() and self.training:
-            self.microbatch_count += 1
-            if self.microbatch_count % num_micro_batches == 0:
-                self.microbatch_count = 0
-                self.is_first_microbatch = True
-            else:
-                self.is_first_microbatch = False
 
         output = hidden_states
-
         # Final layer norm.
         if self.post_process:
             # only apply the final_layernorm for pre-ln
