@@ -664,7 +664,6 @@ class ParallelAttention(MegatronModule):
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
                 params_dtype=self.dtype
             )
-            logging.info(f'||| Parallel attention at init, qkv dtype: {self.query_key_value.dtype}')
         else:
             assert attention_type == AttnType.cross_attn
             self.query = ColumnLinear(
