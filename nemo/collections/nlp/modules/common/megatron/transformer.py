@@ -562,6 +562,8 @@ class FlashAttention(MegatronModule):
         seqlen = output_size[2]
         max_s = seqlen
         cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=qkv.device)
+        logging.info(f'Flash Attention precision: {self.precision}')
+        logging.info(f'Flash Attention qkv dtype and shape: {qkv.shape}\t{qkv.dtype}')
         output = self.flash_attention_fn(
             qkv, cu_seqlens, max_s, self.attention_dropout,
             softmax_scale=None, causal=causal
@@ -610,10 +612,10 @@ class ParallelAttention(MegatronModule):
         activations_checkpoint_granularity=None,
         sequence_parallel=False,
         gradient_accumulation_fusion=False,
-        attention_impl=AttentionImpl.flash
+        attention_impl=AttentionImpl.flash,
     ):
         super(ParallelAttention, self).__init__()
-
+        self.precision = precision
         self.layer_number = max(1, layer_number)
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
@@ -662,6 +664,7 @@ class ParallelAttention(MegatronModule):
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
                 params_dtype=self.dtype
             )
+            logging.info(f'||| Parallel attention at init, qkv dtype: {self.query_key_value.dtype}')
         else:
             assert attention_type == AttnType.cross_attn
             self.query = ColumnLinear(
@@ -775,7 +778,7 @@ class ParallelAttention(MegatronModule):
                 headscale_tensor = inputs[7]
             else:
                 raise ValueError('unexpected number of inputs')
-            output_ = self.core_attention(
+            output_ = self.attention(
                 query_layer,
                 key_layer,
                 value_layer,
@@ -890,7 +893,7 @@ class ParallelAttention(MegatronModule):
         # =====================
         # Query, Key, and Value
         # =====================
-
+        logging.info(f'||| Parallel attention input: {hidden_states.dtype}')
         if self.attention_type == AttnType.self_attn:
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
@@ -978,6 +981,8 @@ class ParallelAttention(MegatronModule):
                 headscale_tensor=self.head_scale_tensor if self.headscale else None,
             )
         else:
+            logging.info(f'|||Parallel attention precision: {self.precision}')
+            logging.info(f'|||Parallel attention: Query layer dtype {query_layer.dtype}')
             context_layer = self.attention(
                 query_layer,
                 key_layer,
