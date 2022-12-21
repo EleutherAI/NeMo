@@ -504,6 +504,7 @@ class FlashAttention(MegatronModule):
         kv_channels=None,
         attention_dropout=0.1,
         sequence_parallel=False,
+
     ):
 
         super(FlashAttention, self).__init__()
@@ -710,7 +711,6 @@ class ParallelAttention(MegatronModule):
                 attn_mask_type=self.attn_mask_type,
                 precision=precision,
                 kv_channels=kv_channels,
-                masked_softmax_fusion=masked_softmax_fusion,
                 attention_dropout=attention_dropout,
                 sequence_parallel=sequence_parallel,
             )
