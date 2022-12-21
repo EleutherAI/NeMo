@@ -501,12 +501,9 @@ class FlashAttention(MegatronModule):
         attention_type=AttnType.self_attn,
         attn_mask_type=AttnMaskType.padding,
         precision=16,
-        apply_query_key_layer_scaling=True,
         kv_channels=None,
-        masked_softmax_fusion=True,
         attention_dropout=0.1,
         sequence_parallel=False,
-        normalize_attention_scores=True,
     ):
 
         super(FlashAttention, self).__init__()
@@ -516,11 +513,7 @@ class FlashAttention(MegatronModule):
         self.bf16 = precision == 'bf16'
 
         self.flash_attention_fn = flash_attn_unpadded_qkvpacked_func
-
-        self.apply_query_key_layer_scaling = apply_query_key_layer_scaling
-        self.attention_softmax_in_fp32 = False
-        if self.apply_query_key_layer_scaling:
-            self.attention_softmax_in_fp32 = True
+    
         self.layer_number = max(1, layer_number)
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
@@ -645,6 +638,15 @@ class ParallelAttention(MegatronModule):
             parallel_state.get_tensor_model_parallel_world_size() == 1 or sequence_parallel
         )
 
+        if precision == 32:
+            self.dtype = torch.float32
+        elif precision == 16:
+            self.dtype = torch.float16
+        elif precision == 'bf16':
+            self.dtype = torch.bfloat16
+        else:
+            raise ValueError
+
         # Strided linear layer.
         if attention_type == AttnType.self_attn:
             self.query_key_value = ColumnLinear(
@@ -657,6 +659,7 @@ class ParallelAttention(MegatronModule):
                 sequence_parallel_enabled=sequence_parallel,
                 no_async_tensor_model_parallel_allreduce=no_async_tensor_model_parallel_allreduce,
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
+                params_dtype=self.dtype
             )
         else:
             assert attention_type == AttnType.cross_attn
@@ -706,7 +709,6 @@ class ParallelAttention(MegatronModule):
                 attention_type=self.attention_type,
                 attn_mask_type=self.attn_mask_type,
                 precision=precision,
-                apply_query_key_layer_scaling=apply_query_key_layer_scaling,
                 kv_channels=kv_channels,
                 masked_softmax_fusion=masked_softmax_fusion,
                 attention_dropout=attention_dropout,
