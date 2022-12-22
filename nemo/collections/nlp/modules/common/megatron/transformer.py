@@ -511,9 +511,17 @@ class FlashAttention(MegatronModule):
 
         super(FlashAttention, self).__init__()
 
+        if precision == 32:
+            raise ValueError('FlashAttention does not support fp32.')
+
         self.precision = precision
         self.fp16 = precision == 16
         self.bf16 = precision == 'bf16'
+
+        if self.fp16:
+            self.dtype = torch.float16
+        else:
+            self.dtype = torch.bfloat16
 
         self.flash_attention_fn = flash_attn_unpadded_qkvpacked_func
     
@@ -559,6 +567,10 @@ class FlashAttention(MegatronModule):
 
         # Combined q/k/v into [b * s, 3, np, hn].
         qkv = torch.concat([query_layer, key_layer, value_layer], dim=1)
+        prev_dtype = None
+        if qkv.dtype != self.dtype:
+            prev_dtype = qkv.dtype
+            qkv.to(self.dtype)
 
         batch_size = output_size[0]
         seqlen = output_size[2]
@@ -570,6 +582,8 @@ class FlashAttention(MegatronModule):
             qkv, cu_seqlens, max_s, self.attention_dropout,
             softmax_scale=None, causal=causal
         )
+        if prev_dtype is not None:
+            output.to(prev_dtype)
         # [b * sq, np, hn] -> [b, sq, np, hn]
         matmul_result = output.view(output_size[0], output_size[2], output.shape[1], output.shape[2])
         # [b, sq, np, hn] -> [b, np, sq, hn]
@@ -643,17 +657,9 @@ class ParallelAttention(MegatronModule):
             parallel_state.get_tensor_model_parallel_world_size() == 1 or sequence_parallel
         )
 
-        if precision == 32:
-            self.dtype = torch.float32
-        elif precision == 16:
-            self.dtype = torch.float16
-        elif precision == 'bf16':
-            self.dtype = torch.bfloat16
-        else:
-            raise ValueError
-
         # Strided linear layer.
         if attention_type == AttnType.self_attn:
+            # TODO: checl self.query_key_value.weight.dtype at initialization for Core vs Flash
             self.query_key_value = ColumnLinear(
                 hidden_size,
                 3 * projection_size,
@@ -664,7 +670,6 @@ class ParallelAttention(MegatronModule):
                 sequence_parallel_enabled=sequence_parallel,
                 no_async_tensor_model_parallel_allreduce=no_async_tensor_model_parallel_allreduce,
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
-                #params_dtype=self.dtype
             )
             logging.info(f'||| QKV dtype: {self.query_key_value.weight.dtype}')
         else:
