@@ -317,6 +317,7 @@ class CoreAttention(MegatronModule):
         self.attention_softmax_in_fp32 = False
         if self.apply_query_key_layer_scaling:
             self.attention_softmax_in_fp32 = True
+        logging.info(f'Softmax in fp32: {self.attention_softmax_in_fp32}')
         self.layer_number = max(1, layer_number)
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
@@ -379,7 +380,8 @@ class CoreAttention(MegatronModule):
 
         # [b, np, sq, sk]
         output_size = (query_layer.size(1), query_layer.size(2), query_layer.size(0), key_layer.size(0))
-
+        logging.info(f'||| Core Attention query layer dtype: {query_layer.dtype}')
+        logging.info(f'|||| Core Attention key layer dtype: {key_layer.dtype}')
         # TODO: figure out how to do this
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
@@ -487,7 +489,7 @@ class CoreAttention(MegatronModule):
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size_per_partition,)
         context_layer = context_layer.view(*new_context_layer_shape)
-
+        logging.info(f'||| Core Attention output dtype: {context_layer.dtype}')
         return context_layer
 
 
@@ -662,8 +664,9 @@ class ParallelAttention(MegatronModule):
                 sequence_parallel_enabled=sequence_parallel,
                 no_async_tensor_model_parallel_allreduce=no_async_tensor_model_parallel_allreduce,
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
-                params_dtype=self.dtype
+                #params_dtype=self.dtype
             )
+            logging.info(f'||| QKV dtype: {self.query_key_value.weight.dtype}')
         else:
             assert attention_type == AttnType.cross_attn
             self.query = ColumnLinear(
