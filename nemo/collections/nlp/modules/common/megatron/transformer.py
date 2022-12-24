@@ -317,7 +317,6 @@ class CoreAttention(MegatronModule):
         self.attention_softmax_in_fp32 = False
         if self.apply_query_key_layer_scaling:
             self.attention_softmax_in_fp32 = True
-        logging.info(f'Softmax in fp32: {self.attention_softmax_in_fp32}')
         self.layer_number = max(1, layer_number)
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
@@ -380,8 +379,6 @@ class CoreAttention(MegatronModule):
 
         # [b, np, sq, sk]
         output_size = (query_layer.size(1), query_layer.size(2), query_layer.size(0), key_layer.size(0))
-        logging.info(f'||| Core Attention query layer dtype: {query_layer.dtype}')
-        logging.info(f'|||| Core Attention key layer dtype: {key_layer.dtype}')
         # TODO: figure out how to do this
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
@@ -489,7 +486,6 @@ class CoreAttention(MegatronModule):
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size_per_partition,)
         context_layer = context_layer.view(*new_context_layer_shape)
-        logging.info(f'||| Core Attention output dtype: {context_layer.dtype}')
         return context_layer
 
 
@@ -576,8 +572,6 @@ class FlashAttention(MegatronModule):
         seqlen = output_size[2]
         max_s = seqlen
         cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=qkv.device)
-        logging.info(f'Flash Attention precision: {self.precision}')
-        logging.info(f'Flash Attention qkv dtype and shape: {qkv.shape}\t{qkv.dtype}')
         output = self.flash_attention_fn(
             qkv, cu_seqlens, max_s, self.attention_dropout,
             softmax_scale=None, causal=causal
@@ -671,7 +665,6 @@ class ParallelAttention(MegatronModule):
                 no_async_tensor_model_parallel_allreduce=no_async_tensor_model_parallel_allreduce,
                 gradient_accumulation_fusion=gradient_accumulation_fusion,
             )
-            logging.info(f'||| QKV dtype: {self.query_key_value.weight.dtype}')
         else:
             assert attention_type == AttnType.cross_attn
             self.query = ColumnLinear(
@@ -900,7 +893,6 @@ class ParallelAttention(MegatronModule):
         # =====================
         # Query, Key, and Value
         # =====================
-        logging.info(f'||| Parallel attention input: {hidden_states.dtype}')
         if self.attention_type == AttnType.self_attn:
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
@@ -988,8 +980,6 @@ class ParallelAttention(MegatronModule):
                 headscale_tensor=self.head_scale_tensor if self.headscale else None,
             )
         else:
-            logging.info(f'|||Parallel attention precision: {self.precision}')
-            logging.info(f'|||Parallel attention: Query layer dtype {query_layer.dtype}')
             context_layer = self.attention(
                 query_layer,
                 key_layer,
