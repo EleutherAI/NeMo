@@ -566,7 +566,7 @@ class FlashAttention(MegatronModule):
         prev_dtype = None
         if qkv.dtype != self.dtype:
             prev_dtype = qkv.dtype
-            qkv.to(self.dtype)
+            qkv = qkv.to(self.dtype)
 
         batch_size = output_size[0]
         seqlen = output_size[2]
