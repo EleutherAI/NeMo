@@ -48,7 +48,8 @@ from nemo.collections.nlp.modules.common.transformer.text_generation import (
 from nemo.collections.nlp.parts.utils_funcs import get_last_rank
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import AppState, logging, timers
-from nemo.collections.nlp.modules.common.megatron.logging import get_flops
+from nemo.collections.nlp.modules.common.megatron.logging import get_flops, human_readable_flops
+
 
 try:
     from apex.transformer import parallel_state
@@ -283,7 +284,16 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         timer.stop("step")
         iter_time_s = timer.get("step")
         timer.reset("step")
-        tflops_per_s_per_gpu = get_flops(self.cfg.data.seq_length, self.cfg.hidden_size, self.cfg.num_layers, self.model.total_params, self.cfg.global_batch_size, iter_time_s) / 1.0e12
+
+        tflops_per_s_per_gpu = get_flops(
+            self.cfg.data.seq_length,
+            self.cfg.hidden_size,
+            self.cfg.num_layers,
+            self.model.total_params,
+            self.cfg.global_batch_size,
+            iter_time_s
+        ) / 1.0e12
+
 
         ## logging
         # we can only log on one rank if it is rank zero so we broadcast from last rank
@@ -294,6 +304,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             loss_scale = self.trainer.precision_plugin.scaler._scale
             if loss_scale is not None:
                 self.log('loss_scale', loss_scale)
+
         self.log('TFLOPS_per_gpu', tflops_per_s_per_gpu, prog_bar=True, rank_zero_only=True)
         self.log('reduced_train_loss', loss_mean, prog_bar=True, rank_zero_only=True)
         lr = self._optimizer.param_groups[0]['lr']
@@ -592,7 +603,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         Args:
             stage (str, optional): Can be 'fit', 'validate', 'test' or 'predict'. Defaults to None.
         """
-                # log number of parameters
+        # log number of parameters
+
         if isinstance(self.model, list):
             num_parameters_on_device = sum(
                 [sum([p.nelement() for p in model_module.parameters()]) for model_module in self.model]
@@ -605,14 +617,19 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 num_parameters_on_device -= num_word_embedding_parameters
         else:
             num_parameters_on_device = sum([p.nelement() for p in self.model.parameters()])
+
             if parallel_state.get_pipeline_model_parallel_world_size() > 1 and parallel_state.is_pipeline_last_stage(
                 ignore_virtual=True
             ):
                 # substract the embedding weights on the last stage
                 num_word_embedding_parameters = sum([p.nelement() for p in self.model.word_embeddings_weight()])
+
                 num_parameters_on_device -= num_word_embedding_parameters
+
         # to be summed across data parallel group
         total_num_parameters = torch.tensor(num_parameters_on_device).cuda()
+
+
         torch.distributed.all_reduce(total_num_parameters, group=parallel_state.get_model_parallel_group())
 
         self.model.total_params = total_num_parameters
@@ -623,6 +640,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             f'Number of model parameters on device: {num_parameters_on_device:.2e}. '
             f'Total number of model parameters: {total_num_parameters:.2e}.'
         )
+
         resume_checkpoint_path = self.trainer._checkpoint_connector.resume_from_checkpoint_fit_path
         if resume_checkpoint_path:
             try:
