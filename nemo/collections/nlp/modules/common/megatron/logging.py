@@ -30,4 +30,3 @@ def get_flops(seq_length, hidden_size, num_layers, total_params, train_batch_siz
     )
     #tflops = flops / 1.0e12
     return flops
-

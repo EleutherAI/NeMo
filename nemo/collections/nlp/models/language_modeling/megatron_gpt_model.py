@@ -50,6 +50,7 @@ from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import AppState, logging, timers
 from nemo.collections.nlp.modules.common.megatron.logging import get_flops, human_readable_flops
 
+
 try:
     from apex.transformer import parallel_state
     from apex.transformer.pipeline_parallel.schedules.common import build_model
@@ -283,6 +284,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         timer.stop("step")
         iter_time_s = timer.get("step")
         timer.reset("step")
+
         tflops_per_s_per_gpu = get_flops(
             self.cfg.data.seq_length,
             self.cfg.hidden_size,
@@ -291,6 +293,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             self.cfg.global_batch_size,
             iter_time_s
         ) / 1.0e12
+
 
         ## logging
         # we can only log on one rank if it is rank zero so we broadcast from last rank
@@ -601,6 +604,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             stage (str, optional): Can be 'fit', 'validate', 'test' or 'predict'. Defaults to None.
         """
         # log number of parameters
+
         if isinstance(self.model, list):
             num_parameters_on_device = sum(
                 [sum([p.nelement() for p in model_module.parameters()]) for model_module in self.model]
@@ -624,6 +628,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
         # to be summed across data parallel group
         total_num_parameters = torch.tensor(num_parameters_on_device).cuda()
+
 
         torch.distributed.all_reduce(total_num_parameters, group=parallel_state.get_model_parallel_group())
 
