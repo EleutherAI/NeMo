@@ -1,5 +1,5 @@
 black==19.10b0
-click==8.0.2
+flash-attn==0.2.2
 isort[requirements] < 5
 parameterized
 pytest
