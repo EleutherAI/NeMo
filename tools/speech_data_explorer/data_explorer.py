@@ -298,19 +298,15 @@ def load_data(
                     data[-1]['I'] = measures['insertions']
                     data[-1]['D'] = measures['deletions']
                     data[-1]['D-I'] = measures['deletions'] - measures['insertions']
-                else:
-                    for k in item:
-                        if k not in data[-1]:
-                            data[-1][k] = item[k]
-            if estimate_audio:
-                filepath = absolute_audio_filepath(item['audio_filepath'], data_filename)
-                signal, sr = librosa.load(path=filepath, sr=None)
-                bw = eval_bandwidth(signal, sr)
-                item['freq_bandwidth'] = int(bw)
-                item['level_db'] = 20 * np.log10(np.max(np.abs(signal)))
-            for k in item:
-                if k not in data[-1]:
-                    data[-1][k] = item[k]
+                if estimate_audio:
+                    filepath = absolute_audio_filepath(item['audio_filepath'], data_filename)
+                    signal, sr = librosa.load(path=filepath, sr=None)
+                    bw = eval_bandwidth(signal, sr)
+                    item['freq_bandwidth'] = int(bw)
+                    item['level_db'] = 20 * np.log10(np.max(np.abs(signal)))
+                for k in item:
+                    if k not in data[-1]:
+                        data[-1][k] = item[k]
 
             vocabulary_data = [{'word': word, 'count': vocabulary[word]} for word in vocabulary]
             return (
@@ -976,9 +972,10 @@ if comparison_mode:
         prevent_initial_call=False,
     )
     def draw_vocab(Ox, Oy, color, size, data, dot_spacing='no', rad=0.01):
-        import pandas as pd
-        import random
         import math
+        import random
+
+        import pandas as pd
 
         df = pd.DataFrame.from_records(data)
 
