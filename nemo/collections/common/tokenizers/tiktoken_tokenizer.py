@@ -40,10 +40,10 @@ class TikTokenTokenizer(TokenizerSpec):
         return self.tokenizer.n_vocab
 
     def text_to_tokens(self, text: str):
-        return self.tokenizer.encode_ordinary(text)
+        raise NotImplementedError("To be implemented")
 
-    def tokens_to_text(self, tokens: List[int]):
-        return self.tokenizer.decode(tokens)
+    def tokens_to_text(self, tokens: List[str]):
+        raise NotImplementedError("To be implemented")
 
     def tokens_to_ids(self, tokens):
         raise NotImplementedError("To be implemented")
@@ -57,11 +57,11 @@ class TikTokenTokenizer(TokenizerSpec):
     def _convert_ids_tokens_to_string(self, ids: Union[int, List[int]]):
         raise NotImplementedError("To be implemented")
 
-    def text_to_ids(self, text):
-        raise NotImplementedError("To be implemented")
+    def text_to_ids(self, text: str):
+        return self.tokenizer.encode_ordinary(text)
 
-    def ids_to_text(self, ids):
-        raise NotImplementedError("To be implemented")
+    def ids_to_text(self, ids: List[int]):
+        return self.tokenizer.decode(ids)
 
     @property
     def add_special_tokens(self, special_tokens_dict: dict) -> int:
@@ -70,7 +70,7 @@ class TikTokenTokenizer(TokenizerSpec):
     @property
     def eos_id(self):
         return self.tokenizer.eot_token
-    
+
     @property
     def eod_id(self):
         return self.tokenizer.eod_token
@@ -85,4 +85,4 @@ class TikTokenTokenizer(TokenizerSpec):
 
     @property
     def name(self):
-        return type(self.tokenizer).__name__
+        return type(self).__name__
