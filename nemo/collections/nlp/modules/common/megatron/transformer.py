@@ -778,7 +778,7 @@ class ParallelAttention(MegatronModule):
         self.layer_number = max(1, layer_number)
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
-        self.normalize_attention_scores = normalize_attention_scores
+        # self.normalize_attention_scores = normalize_attention_scores
 
         self.megatron_legacy = megatron_legacy
 
